@@ -9,10 +9,10 @@ from utils import *
 
 def apply_convolution(im, kernel):
     """
-    Docstring for apply_convolution TODO
-
-    :param im: Description
-    :param kernel: Description
+    Applies convolution on image.
+    :param im: A 2D array representing grayscale image.
+    :param kernel: An array of shape (x,1) or (1,x) that will be used as the kernel for the convolution.
+    :return: A 2D array of the same shape as im, containing convolution results.
     """
     by_row = kernel.shape[0] == 1
 
@@ -35,28 +35,32 @@ def harris_corner_detector(im):
     :param im: A 2D array representing a grayscale image.
     :return: An array with shape (N,2), where its ith entry is the [x,y] coordinates of the ith corner point.
     """
+    # Compute derivatives
     I_x = apply_convolution(im, np.array([1, 0, -1]))
     I_y = apply_convolution(im, np.array([1, 0, -1]).T)
 
+    # Compute products of derivatives and blur them
     I_xx = blur_spatial(I_x**2, 3)
     I_yy = blur_spatial(I_y**2, 3)
     I_xy = blur_spatial(I_x * I_y, 3)
 
+    # Construct matrix for each pixel
     matrices = np.zeros(I_xx.shape + (2, 2))
     matrices[..., 0, 0] = I_xx
     matrices[..., 0, 1] = I_xy
     matrices[..., 1, 0] = I_xy
     matrices[..., 1, 1] = I_yy
 
+    # Compute response for each pixel and run NMS
     det = np.linalg.det(matrices)
     trace = np.trace(matrices, axis1=-2, axis2=-1)
     alpha = 0.04
-
     responses = det - alpha * (trace**2)
-
     suppressed_responses = non_maximum_suppression(responses)
 
-    return np.column_stack(np.nonzero(suppressed_responses))
+    # Return detected corners
+    ys, xs = np.nonzero(suppressed_responses)
+    return np.column_stack((xs, ys))
 
 
 def feature_descriptor(im, points, desc_rad=3):
@@ -67,7 +71,32 @@ def feature_descriptor(im, points, desc_rad=3):
     :param desc_rad: "Radius" of descriptors to compute.
     :return: An array of 2D patches, each patch i representing the descriptor of point i.
     """
-    pass
+    num_of_points = points.shape[0]
+    patch_length = (2 * desc_rad) + 1
+    descriptors = np.zeros((num_of_points, patch_length, patch_length))
+
+    offset = np.arange(-desc_rad, desc_rad + 1)
+    dx, dy = np.meshgrid(offset, offset)
+
+    for i, (x, y) in enumerate(points):
+        # Create coordinates of patch
+        xs = x + dx
+        ys = y + dy
+        coordinates = np.vstack((ys.ravel(), xs.ravel()))
+
+        # Sample patch using bilinear interpolation
+        patch = map_coordinates(im, coordinates, order=1)
+        patch = patch.reshape(patch_length, patch_length)
+
+        # Normalize
+        patch -= patch.mean()
+        norm = np.linalg.norm(patch)
+        if norm > 0:  # TODO: anything that we should do for norm == 0?
+            patch /= norm
+
+        descriptors[i] = patch
+
+    return descriptors
 
 
 def find_features(im):
@@ -79,7 +108,16 @@ def find_features(im):
                 These coordinates are provided at the original image level.
             2) A feature descriptor array with shape (N,K,K)
     """
-    return harris_corner_detector(im), _
+    pyramid = build_gaussian_pyramid(
+        im, 3, filter_size=3
+    )  # TODO: what should filter size be?
+    points = spread_out_corners(
+        im, m=7, n=7, radius=12, harris_corner_detector=harris_corner_detector
+    )  # TODO: we are encouraged to play around with n,m,radius params
+    points_third_level = points / 4.0
+    descriptors = feature_descriptor(pyramid[2], points_third_level, 3)
+
+    return points, descriptors
 
 
 def match_features(desc1, desc2, min_score):
@@ -92,7 +130,26 @@ def match_features(desc1, desc2, min_score):
                 1) An array with shape (M,) and dtype int of matching indices in desc1.
                 2) An array with shape (M,) and dtype int of matching indices in desc2.
     """
-    pass
+    n1 = desc1.shape[0]
+    n2 = desc2.shape[0]
+
+    # Flatten descriptors for dot product
+    d1 = desc1.reshape(n1, -1)
+    d2 = desc2.reshape(n2, -1)
+
+    # Compute scores
+    scores = np.dot(d1, d2.T)
+
+    # Threshold based on 2nd best match in rows and columns
+    threshold_1 = np.partition(scores, -2, axis=1)[:, -2][:, np.newaxis]
+    threshold_2 = np.partition(scores, -2, axis=0)[-2, :][np.newaxis, :]
+
+    # Select matches that fit all criteria
+    matches = (scores >= threshold_1) & (scores >= threshold_2) & (scores > min_score)
+
+    idx1, idx2 = np.nonzero(matches)
+
+    return idx1.astype(int), idx2.astype(int)
 
 
 def apply_homography(pos1, H12):
@@ -102,7 +159,19 @@ def apply_homography(pos1, H12):
     :param H12: A 3x3 homography matrix.
     :return: An array with the same shape as pos1 with [x,y] point coordinates obtained from transforming pos1 using H12.
     """
-    pass
+    # Convert to homogenous coordinates
+    n = pos1.shape[0]
+    ones = np.ones((n, 1))
+    homogenous_points = np.hstack((pos1, ones))
+
+    # Apply homography
+    transformed = (H12 @ homogenous_points.T).T
+
+    # Project back to 2d
+    third_coordinate = transformed[:, 2][:, np.newaxis]
+    pos2 = transformed[:, :2] / third_coordinate
+
+    return pos2
 
 
 def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=False):
@@ -118,7 +187,36 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
                 2) An Array with shape (S,) where S is the number of inliers,
                     containing the indices in pos1/pos2 of the maximal set of inlier matches found.
     """
-    pass
+    n = points1.shape[0]
+    if n < 2:
+        return None, np.array([])
+
+    best_inliers_idxs = np.array([])
+
+    for _ in range(num_iter):
+        # Randomly sample two points
+        idxs = np.random.choice(n, 2, replace=False)
+        p1_sample = points1[idxs]
+        p2_sample = points2[idxs]
+
+        # Estimate homography and compute reprojection error
+        H12 = estimate_rigid_transform(p1_sample, p2_sample, translation_only)
+        transformed_p1 = apply_homography(points1, H12)
+        sq_dist = np.sum((transformed_p1 - points2) ** 2, axis=1)
+
+        # Find inliers
+        cur_inliers_idxs = np.where(sq_dist < inlier_tol)[0]
+
+        # Track best inlier set
+        if len(cur_inliers_idxs) > len(best_inliers_idxs):
+            best_inliers_idxs = cur_inliers_idxs
+
+    # Re-estimate homography using best inliers
+    best_H12 = estimate_rigid_transform(
+        points1[best_inliers_idxs], points2[best_inliers_idxs], translation_only
+    )
+
+    return best_H12, best_inliers_idxs
 
 
 def display_matches(im1, im2, points1, points2, inliers):
@@ -130,7 +228,30 @@ def display_matches(im1, im2, points1, points2, inliers):
     :param points2: An aray shape (N,2), containing N rows of [x,y] coordinates of matched points in im2.
     :param inliers: An array with shape (S,) of inlier matches.
     """
-    pass
+    # Place images side by side
+    combined_im = np.hstack((im1, im2))
+
+    # Shift points of second image to match coordinates in new combined image
+    points2_shifted = points2.copy()
+    points2_shifted[:, 0] += im1.shape[1]
+
+    plt.imshow(combined_im, cmap="gray")
+
+    # Mark inliers
+    is_inlier = np.zeros(len(points1))
+    is_inlier[inliers] = True
+
+    # Draw color-coded lines between matches
+    for i in range(len(points1)):
+        x_coordinates = [points1[i, 0], points2_shifted[i, 0]]
+        y_coordinates = [points1[i, 1], points2_shifted[i, 1]]
+
+        color = "b" if is_inlier[i] else "y"
+        plt.plot(
+            x_coordinates, y_coordinates, c=color, lw=0.3, mfc="r", marker="o", ms=3
+        )
+
+    plt.show()
 
 
 def accumulate_homographies(H_successive, m):
@@ -316,16 +437,16 @@ def generate_panoramic_images(
 
 
 if __name__ == "__main__":
-    # import ffmpeg
+    import ffmpeg
 
-    # video_name = "mt_cook.mp4"
-    # video_name_base = video_name.split(".")[0]
-    # os.makedirs(f"dump/{video_name_base}", exist_ok=True)
-    # ffmpeg.input(f"videos/{video_name}").output(
-    #     f"dump/{video_name_base}/{video_name_base}%03d.jpg"
-    # ).run()
-    # num_images = len(os.listdir(f"dump/{video_name_base}"))
-    # print(f"Generated {num_images} images")
+    video_name = "mt_cook.mp4"
+    video_name_base = video_name.split(".")[0]
+    os.makedirs(f"dump/{video_name_base}", exist_ok=True)
+    ffmpeg.input(f"videos/{video_name}").output(
+        f"dump/{video_name_base}/{video_name_base}%03d.jpg"
+    ).run()
+    num_images = len(os.listdir(f"dump/{video_name_base}"))
+    print(f"Generated {num_images} images")
 
     # Visualize feature points on two sample images
     print("Extracting and visualizing feature points...")
@@ -361,11 +482,11 @@ if __name__ == "__main__":
     display_matches(image1, image2, matched_points1, matched_points2, inliers)
 
     # Generate panoramic images
-    print("\nGenerating panoramic images...")
-    generate_panoramic_images(
-        f"dump/{video_name_base}/",
-        video_name_base,
-        num_images=num_images,
-        out_dir=f"out/{video_name_base}",
-        number_of_panoramas=3,
-    )
+    # print("\nGenerating panoramic images...")
+    # generate_panoramic_images(
+    #     f"dump/{video_name_base}/",
+    #     video_name_base,
+    #     num_images=num_images,
+    #     out_dir=f"out/{video_name_base}",
+    #     number_of_panoramas=3,
+    # )
