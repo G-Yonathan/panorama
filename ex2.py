@@ -7,28 +7,6 @@ from scipy.ndimage import map_coordinates
 from utils import *
 
 
-def apply_convolution(im, kernel):
-    """
-    Applies convolution on image.
-    :param im: A 2D array representing grayscale image.
-    :param kernel: An array of shape (x,1) or (1,x) that will be used as the kernel for the convolution.
-    :return: A 2D array of the same shape as im, containing convolution results.
-    """
-    by_row = kernel.shape[0] == 1
-
-    out = np.zeros_like(im)
-
-    n = im.shape[0] if by_row else im.shape[1]
-
-    for i in range(n):
-        if by_row:
-            out[i, :] = convolve(im[i, :], kernel, mode="same")
-        else:
-            out[:, i] = convolve(im[:, i], kernel)
-
-    return out
-
-
 def harris_corner_detector(im):
     """
     Implements the harris corner detection algorithm.
@@ -36,8 +14,8 @@ def harris_corner_detector(im):
     :return: An array with shape (N,2), where its ith entry is the [x,y] coordinates of the ith corner point.
     """
     # Compute derivatives
-    I_x = apply_convolution(im, np.array([1, 0, -1]))
-    I_y = apply_convolution(im, np.array([1, 0, -1]).T)
+    I_x = convolve2d(im, np.array([[1, 0, -1]]), mode="same", boundary="symm")
+    I_y = convolve2d(im, np.array([[1, 0, -1]]).T, mode="same", boundary="symm")
 
     # Compute products of derivatives and blur them
     I_xx = blur_spatial(I_x**2, 3)
@@ -56,7 +34,10 @@ def harris_corner_detector(im):
     trace = np.trace(matrices, axis1=-2, axis2=-1)
     alpha = 0.04
     responses = det - alpha * (trace**2)
-    suppressed_responses = non_maximum_suppression(responses)
+    try:
+        suppressed_responses = non_maximum_suppression(responses)
+    except ValueError:
+        return np.empty((0, 2))
 
     # Return detected corners
     ys, xs = np.nonzero(suppressed_responses)
@@ -85,7 +66,7 @@ def feature_descriptor(im, points, desc_rad=3):
         coordinates = np.vstack((ys.ravel(), xs.ravel()))
 
         # Sample patch using bilinear interpolation
-        patch = map_coordinates(im, coordinates, order=1)
+        patch = map_coordinates(im, coordinates, order=1)  # TODO: set different mode?
         patch = patch.reshape(patch_length, patch_length)
 
         # Normalize
@@ -212,6 +193,7 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
             best_inliers_idxs = cur_inliers_idxs
 
     # Re-estimate homography using best inliers
+    # TODO: Handle case where best inliers is empty and estimate might crash?
     best_H12 = estimate_rigid_transform(
         points1[best_inliers_idxs], points2[best_inliers_idxs], translation_only
     )
@@ -254,7 +236,7 @@ def display_matches(im1, im2, points1, points2, inliers):
     plt.show()
 
 
-def accumulate_homographies(H_successive, m):
+def accumulate_homographies(H_successive, m):  # TODO: num8
     """
     Convert a list of successive homographies to a list of homographies to a common reference frame.
     :param H_successive: A list of M-1 3x3 homography
@@ -265,7 +247,22 @@ def accumulate_homographies(H_successive, m):
     :return: A list of M 3x3 homography matrices,
       where H2m[i] transforms points from coordinate system i to coordinate system m
     """
-    pass
+
+    H2m = H_successive.copy()
+    H2m.insert(m, np.identity(3))
+    M = len(H2m)
+
+    for i in range(m - 1, -1, -1):
+        H2m[i] = H2m[i + 1] @ H2m[i]
+        # Normalization
+        H2m[i] = H2m[i] / H2m[i][2][2]
+
+    for i in range(m + 1, M):
+        H2m[i] = H2m[i - 1] @ np.linalg.inv(H2m[i])
+        # Normalization
+        H2m[i] = H2m[i] / H2m[i][2][2]
+
+    return H2m
 
 
 def compute_bounding_box(homography, w, h):
@@ -277,7 +274,19 @@ def compute_bounding_box(homography, w, h):
     :return: 2x2 array, where the first row is [x,y] of the top left corner,
      and the second row is the [x,y] of the bottom right corner
     """
-    pass
+    corners = np.array([[0, 0], [0, h], [w, 0], [w, h]])
+
+    applied_homography = apply_homography(corners, homography)
+
+    min_x = min_y = np.inf
+    max_x = max_y = -np.inf
+    for v in applied_homography:
+        min_x = min(min_x, v[0])
+        max_x = max(max_x, v[0])
+        min_y = min(min_y, v[1])
+        max_y = max(max_y, v[1])
+
+    return np.array([np.floor([min_x, min_y]), np.ceil([max_x, max_y])]).astype(int)
 
 
 def warp_channel(image, homography):
@@ -287,7 +296,27 @@ def warp_channel(image, homography):
     :param homography: homograhpy.
     :return: A 2d warped image.
     """
-    pass
+
+    h, w = image.shape
+    box = compute_bounding_box(homography, w, h)
+
+    min_x, min_y, max_x, max_y = box[0][0], box[0][1], box[1][0], box[1][1]
+    # warped = np.zeros((max_x - min_x, max_y - min_y)) # TODO: delete
+    x_range = np.arange(min_x, max_x)
+    y_range = np.arange(min_y, max_y)
+
+    x_grid, y_grid = np.meshgrid(x_range, y_range)
+
+    points = np.column_stack((x_grid.ravel(), y_grid.ravel()))
+    inv_homo = np.linalg.inv(homography)
+
+    inv_points = apply_homography(points, inv_homo)
+
+    return map_coordinates(
+        image, [inv_points[:, 1], inv_points[:, 0]], order=1
+    ).reshape(
+        len(y_range), len(x_range)
+    )  # TODO: set mode?
 
 
 def warp_image(image, homography):
@@ -297,7 +326,11 @@ def warp_image(image, homography):
     :param homography: homograhpy.
     :return: A warped image.
     """
-    pass
+    warped = []
+    for i in range(image.shape[2]):
+        warped.append(warp_channel(image[:, :, i], homography))
+
+    return np.stack(warped, axis=2)
 
 
 ##################################################################################################
@@ -310,13 +343,17 @@ def align_images(files, translation_only=False):
     """
     # Extract feature point locations and descriptors.
     points_and_descriptors = []
+    cnt = 1  # TODO: delete
     for file in files:
+        print(f"c{cnt}")
+        cnt += 1  # TODO: delete
         image = read_image(file, 1)
         points_and_descriptors.append(find_features(image))
 
     # Compute homographies between successive pairs of images.
     Hs = []
     for i in range(len(points_and_descriptors) - 1):
+        print(f"b{i}")
         points1, points2 = (
             points_and_descriptors[i][0],
             points_and_descriptors[i + 1][0],
@@ -368,6 +405,7 @@ def generate_panoramic_images(
     files = list(filter(os.path.exists, files))
     print("found %d images" % len(files))
     image = read_image(files[0], 1)
+    print("read")
     h, w = image.shape
 
     frames_for_panoramas, homographies = align_images(files, translation_only)
@@ -375,6 +413,7 @@ def generate_panoramic_images(
     # compute bounding boxes of all warped input images in the coordinate system of the middle image (as given by the homographies)
     bounding_boxes = np.zeros((frames_for_panoramas.size, 2, 2))
     for i in range(frames_for_panoramas.size):
+        print(f"aa{i}, ", end="")
         bounding_boxes[i] = compute_bounding_box(homographies[i], w, h)
 
     # change our reference coordinate system to the panoramas
@@ -389,6 +428,7 @@ def generate_panoramic_images(
     # every slice is a different panorama, it indicates the slices of the input images from which the panorama
     # will be concatenated
     for i in range(slice_centers.size):
+        print(f"a{i}, ", end="")
         slice_center_2d = np.array([slice_centers[i], h // 2])[None, :]
         # homography warps the slice center to the coordinate system of the middle image
         warped_centers = [apply_homography(slice_center_2d, h) for h in homographies]
@@ -414,6 +454,7 @@ def generate_panoramic_images(
         (number_of_panoramas, panorama_size[1], panorama_size[0], 3), dtype=np.float64
     )
     for i, frame_index in enumerate(frames_for_panoramas):
+        print(f"{i}, ", end="")
         # warp every input image once, and populate all panoramas
         image = read_image(files[frame_index], 2)
         warped_image = warp_image(image, homographies[i])
@@ -439,7 +480,7 @@ def generate_panoramic_images(
 if __name__ == "__main__":
     import ffmpeg
 
-    video_name = "mt_cook.mp4"
+    video_name = "peyto_lake.mp4"  # TODO: change back to mt_cook
     video_name_base = video_name.split(".")[0]
     os.makedirs(f"dump/{video_name_base}", exist_ok=True)
     ffmpeg.input(f"videos/{video_name}").output(
@@ -463,7 +504,7 @@ if __name__ == "__main__":
 
     # Visualize points on second image
     print(f"Found {len(points2)} feature points in image 2")
-    visualize_points(image2, points2)
+    # visualize_points(image2, points2)
 
     # Match features between the two images
     print("Matching features between images...")
@@ -479,14 +520,14 @@ if __name__ == "__main__":
     print(f"Found {len(inliers)} inliers out of {len(matched_points1)} matches")
 
     # Display matches with inliers and outliers
-    display_matches(image1, image2, matched_points1, matched_points2, inliers)
+    # display_matches(image1, image2, matched_points1, matched_points2, inliers)
 
     # Generate panoramic images
-    # print("\nGenerating panoramic images...")
-    # generate_panoramic_images(
-    #     f"dump/{video_name_base}/",
-    #     video_name_base,
-    #     num_images=num_images,
-    #     out_dir=f"out/{video_name_base}",
-    #     number_of_panoramas=3,
-    # )
+    print("\nGenerating panoramic images...")
+    generate_panoramic_images(
+        f"dump/{video_name_base}/",
+        video_name_base,
+        num_images=num_images,
+        out_dir=f"out/{video_name_base}",
+        number_of_panoramas=3,
+    )
