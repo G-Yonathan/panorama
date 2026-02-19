@@ -66,13 +66,13 @@ def feature_descriptor(im, points, desc_rad=3):
         coordinates = np.vstack((ys.ravel(), xs.ravel()))
 
         # Sample patch using bilinear interpolation
-        patch = map_coordinates(im, coordinates, order=1)  # TODO: set different mode?
+        patch = map_coordinates(im, coordinates, order=1)
         patch = patch.reshape(patch_length, patch_length)
 
         # Normalize
         patch -= patch.mean()
         norm = np.linalg.norm(patch)
-        if norm > 0:  # TODO: anything that we should do for norm == 0?
+        if norm > 0:
             patch /= norm
 
         descriptors[i] = patch
@@ -172,7 +172,7 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
     if n < 2:
         return None, np.array([])
 
-    best_inliers_idxs = np.array([])
+    best_inliers_idxs = np.array([], dtype=int)
 
     for _ in range(num_iter):
         # Randomly sample two points
@@ -236,7 +236,7 @@ def display_matches(im1, im2, points1, points2, inliers):
     plt.show()
 
 
-def accumulate_homographies(H_successive, m):  # TODO: num8
+def accumulate_homographies(H_successive, m):
     """
     Convert a list of successive homographies to a list of homographies to a common reference frame.
     :param H_successive: A list of M-1 3x3 homography
@@ -301,7 +301,6 @@ def warp_channel(image, homography):
     box = compute_bounding_box(homography, w, h)
 
     min_x, min_y, max_x, max_y = box[0][0], box[0][1], box[1][0], box[1][1]
-    # warped = np.zeros((max_x - min_x, max_y - min_y)) # TODO: delete
     x_range = np.arange(min_x, max_x)
     y_range = np.arange(min_y, max_y)
 
@@ -312,11 +311,13 @@ def warp_channel(image, homography):
 
     inv_points = apply_homography(points, inv_homo)
 
-    return map_coordinates(
+    warped_image = map_coordinates(
         image, [inv_points[:, 1], inv_points[:, 0]], order=1
     ).reshape(
         len(y_range), len(x_range)
     )  # TODO: set mode?
+
+    return np.clip(warped_image, 0, 1)
 
 
 def warp_image(image, homography):
@@ -345,7 +346,7 @@ def align_images(files, translation_only=False):
     points_and_descriptors = []
     cnt = 1  # TODO: delete
     for file in files:
-        print(f"c{cnt}")
+        print(f"c{cnt}")  # TODO: delete
         cnt += 1  # TODO: delete
         image = read_image(file, 1)
         points_and_descriptors.append(find_features(image))
@@ -480,7 +481,7 @@ def generate_panoramic_images(
 if __name__ == "__main__":
     import ffmpeg
 
-    video_name = "peyto_lake.mp4"  # TODO: change back to mt_cook
+    video_name = "itays_room_short2.mp4"  # TODO: change back to mt_cook
     video_name_base = video_name.split(".")[0]
     os.makedirs(f"dump/{video_name_base}", exist_ok=True)
     ffmpeg.input(f"videos/{video_name}").output(
@@ -491,8 +492,12 @@ if __name__ == "__main__":
 
     # Visualize feature points on two sample images
     print("Extracting and visualizing feature points...")
-    image1 = read_image(f"dump/{video_name_base}/{video_name_base}200.jpg", 1)
-    image2 = read_image(f"dump/{video_name_base}/{video_name_base}300.jpg", 1)
+    image1 = read_image(
+        f"dump/{video_name_base}/{video_name_base}100.jpg", 1
+    )  # TODO 200
+    image2 = read_image(
+        f"dump/{video_name_base}/{video_name_base}101.jpg", 1
+    )  # TODO 300
 
     # Extract feature points and descriptors
     points1, desc1 = find_features(image1)
@@ -500,7 +505,7 @@ if __name__ == "__main__":
 
     # Visualize points on first image
     print(f"Found {len(points1)} feature points in image 1")
-    visualize_points(image1, points1)
+    # visualize_points(image1, points1)
 
     # Visualize points on second image
     print(f"Found {len(points2)} feature points in image 2")
@@ -520,7 +525,7 @@ if __name__ == "__main__":
     print(f"Found {len(inliers)} inliers out of {len(matched_points1)} matches")
 
     # Display matches with inliers and outliers
-    # display_matches(image1, image2, matched_points1, matched_points2, inliers)
+    display_matches(image1, image2, matched_points1, matched_points2, inliers)
 
     # Generate panoramic images
     print("\nGenerating panoramic images...")
