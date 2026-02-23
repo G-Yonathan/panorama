@@ -89,12 +89,10 @@ def find_features(im):
                 These coordinates are provided at the original image level.
             2) A feature descriptor array with shape (N,K,K)
     """
-    pyramid = build_gaussian_pyramid(
-        im, 3, filter_size=3
-    )  # TODO: what should filter size be?
+    pyramid = build_gaussian_pyramid(im, 3, filter_size=3)
     points = spread_out_corners(
         im, m=7, n=7, radius=12, harris_corner_detector=harris_corner_detector
-    )  # TODO: we are encouraged to play around with n,m,radius params
+    )
     points_third_level = points / 4.0
     descriptors = feature_descriptor(pyramid[2], points_third_level, 3)
 
@@ -193,10 +191,12 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
             best_inliers_idxs = cur_inliers_idxs
 
     # Re-estimate homography using best inliers
-    # TODO: Handle case where best inliers is empty and estimate might crash?
-    best_H12 = estimate_rigid_transform(
-        points1[best_inliers_idxs], points2[best_inliers_idxs], translation_only
-    )
+    if len(best_inliers_idxs) < 2:
+        best_H12 = np.eye(3)
+    else:
+        best_H12 = estimate_rigid_transform(
+            points1[best_inliers_idxs], points2[best_inliers_idxs], translation_only
+        )
 
     return best_H12, best_inliers_idxs
 
@@ -313,9 +313,7 @@ def warp_channel(image, homography):
 
     warped_image = map_coordinates(
         image, [inv_points[:, 1], inv_points[:, 0]], order=1
-    ).reshape(
-        len(y_range), len(x_range)
-    )  # TODO: set mode?
+    ).reshape(len(y_range), len(x_range))
 
     return np.clip(warped_image, 0, 1)
 
@@ -344,17 +342,13 @@ def align_images(files, translation_only=False):
     """
     # Extract feature point locations and descriptors.
     points_and_descriptors = []
-    cnt = 1  # TODO: delete
     for file in files:
-        print(f"c{cnt}")  # TODO: delete
-        cnt += 1  # TODO: delete
         image = read_image(file, 1)
         points_and_descriptors.append(find_features(image))
 
     # Compute homographies between successive pairs of images.
     Hs = []
     for i in range(len(points_and_descriptors) - 1):
-        print(f"b{i}")
         points1, points2 = (
             points_and_descriptors[i][0],
             points_and_descriptors[i + 1][0],
@@ -406,7 +400,6 @@ def generate_panoramic_images(
     files = list(filter(os.path.exists, files))
     print("found %d images" % len(files))
     image = read_image(files[0], 1)
-    print("read")
     h, w = image.shape
 
     frames_for_panoramas, homographies = align_images(files, translation_only)
@@ -414,7 +407,6 @@ def generate_panoramic_images(
     # compute bounding boxes of all warped input images in the coordinate system of the middle image (as given by the homographies)
     bounding_boxes = np.zeros((frames_for_panoramas.size, 2, 2))
     for i in range(frames_for_panoramas.size):
-        print(f"aa{i}, ", end="")
         bounding_boxes[i] = compute_bounding_box(homographies[i], w, h)
 
     # change our reference coordinate system to the panoramas
@@ -429,7 +421,6 @@ def generate_panoramic_images(
     # every slice is a different panorama, it indicates the slices of the input images from which the panorama
     # will be concatenated
     for i in range(slice_centers.size):
-        print(f"a{i}, ", end="")
         slice_center_2d = np.array([slice_centers[i], h // 2])[None, :]
         # homography warps the slice center to the coordinate system of the middle image
         warped_centers = [apply_homography(slice_center_2d, h) for h in homographies]
@@ -455,7 +446,6 @@ def generate_panoramic_images(
         (number_of_panoramas, panorama_size[1], panorama_size[0], 3), dtype=np.float64
     )
     for i, frame_index in enumerate(frames_for_panoramas):
-        print(f"{i}, ", end="")
         # warp every input image once, and populate all panoramas
         image = read_image(files[frame_index], 2)
         warped_image = warp_image(image, homographies[i])
@@ -481,7 +471,7 @@ def generate_panoramic_images(
 if __name__ == "__main__":
     import ffmpeg
 
-    video_name = "itays_room_short2.mp4"  # TODO: change back to mt_cook
+    video_name = "mt_cook.mp4"
     video_name_base = video_name.split(".")[0]
     os.makedirs(f"dump/{video_name_base}", exist_ok=True)
     ffmpeg.input(f"videos/{video_name}").output(
@@ -492,12 +482,8 @@ if __name__ == "__main__":
 
     # Visualize feature points on two sample images
     print("Extracting and visualizing feature points...")
-    image1 = read_image(
-        f"dump/{video_name_base}/{video_name_base}100.jpg", 1
-    )  # TODO 200
-    image2 = read_image(
-        f"dump/{video_name_base}/{video_name_base}101.jpg", 1
-    )  # TODO 300
+    image1 = read_image(f"dump/{video_name_base}/{video_name_base}200.jpg", 1)
+    image2 = read_image(f"dump/{video_name_base}/{video_name_base}300.jpg", 1)
 
     # Extract feature points and descriptors
     points1, desc1 = find_features(image1)
@@ -525,7 +511,7 @@ if __name__ == "__main__":
     print(f"Found {len(inliers)} inliers out of {len(matched_points1)} matches")
 
     # Display matches with inliers and outliers
-    display_matches(image1, image2, matched_points1, matched_points2, inliers)
+    # display_matches(image1, image2, matched_points1, matched_points2, inliers)
 
     # Generate panoramic images
     print("\nGenerating panoramic images...")
